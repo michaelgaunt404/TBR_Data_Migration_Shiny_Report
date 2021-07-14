@@ -1,0 +1,266 @@
+---
+title: "Title"
+subtitle: "Subtitle"
+author: "Mike Gaunt"
+date: "`r Sys.Date()`"
+output: github_document
+knit: (function(inputFile, encoding) { rmarkdown::render(inputFile, encoding = encoding, output_file = paste0(substr(inputFile,1,nchar(inputFile)-4),Sys.Date(),'.html')) })
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  cache = FALSE, cache.lazy = FALSE, autodep = TRUE, warning = FALSE, 
+  message = FALSE, echo = TRUE, dpi = 180,
+  fig.width = 8, fig.height = 5, echo = FALSE
+  )
+```
+
+```{r include=FALSE}
+#library set-up=================================================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+library(tidyverse)
+library(networkD3)
+library(tidygraph)
+library(ggraph)
+library(readxl)
+library(here)
+```
+
+```{r include=FALSE}
+#data set-up====================================================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+data_file = "ETAN_Queries/ssms_queries_20210525.xlsx"
+
+data_file_path = data_file %>%
+  paste0("data/", .) %>%
+  here()
+
+query_list = paste0("Sheet", (1:3)) %>%  
+  map(~ read_xlsx(data_file_path,
+                  sheet = .x,
+                  skip = 3))
+
+count_list = query_list[[2]]
+constraint_list = query_list[[3]]
+```
+
+```{r}
+#var defintion==================================================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+```
+
+```{r}
+#custom function defintion======================================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+source(here("code/helpers_networkPlots.R"))
+source(here("code/utils_helpers_general.R"))
+```
+
+
+# Introduction/Summary
+  
+# Intended Work Flow
+
+Placeholder.
+
+# Validation Operations
+
+```{r}
+tmp = count_list %>%  
+  group_by(SchemaName) %>%  
+  summarise(`Total Records` = sum(rows)) 
+
+count_list %>%  
+  mutate(SchemaName = fct_reorder(SchemaName, rows, sum)) %>% 
+  ggplot() + 
+  geom_col(aes(SchemaName, rows, fill = TableName)) + 
+  theme(legend.position = "none") + 
+  coord_flip() + 
+  scale_fill_viridis_d() +
+  labs(title = "Records per Schema")
+```
+
+```{r}
+count_list %>%  
+  mutate(TableName = fct_reorder(TableName, rows, sum)) %>% 
+  filter(rows > 100) %>% 
+  ggplot() + 
+  geom_col(aes(TableName, rows)) + 
+  theme(legend.position = "none") + 
+  coord_flip() + 
+  scale_fill_viridis_d() +
+  labs(title = "Records per Table")
+```
+
+
+```{r}
+cleaned_connections = 
+  constraint_list %>%
+  filter(str_detect(CONSTRAINT_NAME, "2")) %>%  #only keeps records where CONSTRAINT_NAME has a "2" in it
+  separate(col = CONSTRAINT_NAME, sep ="_2_", into = c("from_complete", "to_complete")) %>%  
+  na_if("NA") %>%  #makes sure string NAs are registered 
+  filter(complete.cases(.)) %>%  #removes incomplete records
+  filter(!str_detect(from_complete, "description_")) %>%  #removes records where from has "description_" - should be fixed later but don't know how to now
+  filter(str_detect(to_complete, "_")) %>% #removes records that do not have schema_table
+  separate(col = from_complete, sep ="_", into = c("type", "from_table", "from_column"), remove = F) %>% 
+  separate(col = to_complete, sep ="_", into = c("to_schema", "to_table"), remove = F) %>%  
+  mutate(from_complete = str_sub(from_complete, 4,-1), 
+         from_schema = CONSTRAINT_SCHEMA, 
+         from_complete = paste0(from_schema, "_", from_table)) %>%  
+  merge(count_list[, c(1,3)], by.x = "from_table", by.y = "TableName") %>%  
+  merge(count_list[, c(1,3)], by.x = "to_table", by.y = "TableName", suffixes = c("_from", "_to"), all.x = T) %>%
+  select("CONSTRAINT_CATALOG", "type", contains("from"), contains("to")) %>%  
+   rename(c('to_rows' = 'rows_to', 'from_rows' = 'rows_from')) %>% 
+  arrange(desc(from_rows)) %>%  
+  mutate(as_of = Sys.Date())
+
+
+cleaned_connections_0filtered = cleaned_connections %>%  
+  filter(to_rows > 0, 
+         from_rows > 0)
+
+```
+
+```{r}
+cleaned_connections_0filtered %>%  
+  write.csv(here("data/ETAN_cleaned_connections_filtered.csv"))
+
+cleaned_connections %>%  
+  write.csv(here("data/ETAN_cleaned_connections.csv"))
+```
+
+
+```{r}
+cleaned_connections %>%  
+  group_by(from_table, to_table) %>%  
+  count(sort = T) 
+```
+
+```{r eval=FALSE, echo = F}
+
+
+# tmp = cleaned_connections
+tmp = cleaned_connections_0filtered
+
+links = make_links(tmp, "from_complete", "to_complete")
+
+nodes = make_nodes(links) 
+# %>%  
+#   mutate(group = gsub("_.*","\\1", name) %>%  
+#            as.factor() %>%  
+#            as.numeric()) %>%
+#   select(name, group)
+
+merge_link_node(links, nodes) %>%  simpleNetwork(zoom = T, charge = -30)
+
+merge_link_node(links, nodes) %>%  
+  select(from, to) %>%  
+  mutate(value = 1) %>%  
+  as_tbl_graph() %>%  
+  ggraph(layout = 'linear', circular = T) +
+  geom_edge_arc() +
+  geom_node_point() +
+  geom_node_text(aes(label = name))
+  geom_node_text(aes(label = name), angle = 45, nudge_y = -8, nudge_x = -3, size = 3
+                 ) + 
+  coord_cartesian(xlim =c(-3, NA)) + 
+    theme_classic()
+  
+  networkD3::simpleNetwork(zoom = T, charge = -100)
+```
+
+```{r}
+tmp = cleaned_connections_0filtered
+
+remove_list = c("info_InputSource", "info_InputUser")
+
+tmp = tmp %>%  
+  filter(to_complete %nin%  remove_list,
+         from_complete %nin%  remove_list)
+  
+
+links = make_links(tmp, "from_complete", "to_complete")
+
+nodes = make_nodes(links) %>%  
+  arrange(id)
+
+links2 = merge_link_node(links, nodes) %>%  
+  select(source, target) %>%  
+  mutate(value = 1)
+  
+nodes2 = nodes %>%  
+    mutate(group = gsub("_.*","\\1", name) %>%
+             as.factor()            , 
+           name = as.factor(name)) %>%
+    select(name, group)  
+
+forceNetwork(Links = links2, Nodes = nodes2,
+            Source = "source", Target = "target",
+            Value = "value", NodeID = "name",
+            Group = "group", opacity = 0.8, fontSize = 12, charge = -10,
+            zoom = T, legend = T,
+  arrows = T, bounded = T)
+  
+```
+
+```{r fig.height=12}
+
+
+nodes %>%  
+  arrange(name) %>%  
+  mutate(id = row_number()) %>% 
+  merge_link_node(links, .) %>%  
+  select(to, from) %>%  
+  mutate(value = 1) %>%  
+  as_tbl_graph() %>%  
+  mutate(Popularity = centrality_degree(mode = 'in')) %>% 
+  activate(nodes) %>% 
+  mutate(color = gsub("_.*", "\\1", name) %>%  
+           as.factor()) %>% 
+  ggraph(layout = 'linear', circular = F) +
+  geom_edge_arc(aes(alpha = stat(index)), show.legend = FALSE) +
+  geom_node_point(aes(color = color, size = Popularity)) + 
+  coord_flip()  +
+      geom_node_text(aes(label = name), nudge_y = -5, size = 3)
+```
+
+
+
+```{r eval=F, echo=F}
+
+nodes %>%  
+  arrange(name) %>%  
+  mutate(id = row_number()) %>% 
+  merge_link_node(links, .) %>%  
+  select(to, from) %>%  
+  mutate(value = 1) %>%  
+  as_tbl_graph() %>%  
+  mutate(Popularity = centrality_degree(mode = 'in')) %>% 
+  activate(nodes) %>% 
+  mutate(color = gsub("_.*", "\\1", name) %>%  
+           as.factor()) %>% 
+ggraph(., 'kk') + 
+    geom_edge_elbow() + 
+  geom_node_point() +
+        geom_node_text(aes(label = name))
+
+    coord_fixed()
+```
+
+```{r eval=F, echo=F}
+nodes %>%  
+  arrange(name) %>%  
+  mutate(id = row_number()) %>% 
+  merge_link_node(links, .) %>%  
+  select(to, from) %>%  
+  mutate(value = 1) %>%  
+  as_tbl_graph() %>%  
+  mutate(Popularity = centrality_degree(mode = 'in')) %>% 
+  activate(nodes) %>% 
+  mutate(color = gsub("_.*", "\\1", name) %>%  
+           as.factor()) %>% 
+ggraph(., 'circlepack') + 
+    geom_edge_link() + 
+    geom_node_point(aes(colour = depth)) 
+```
+

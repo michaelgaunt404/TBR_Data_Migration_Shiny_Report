@@ -1,0 +1,506 @@
+---
+title: "ETAN Database Exploration Tool"
+resource_files:
+- ssms_queries_20210610.xlsx
+- ssms_queries_20210614.xlsx
+- ssms_queries_20210616.xlsx
+- ssms_queries_20210621.xlsx
+runtime: shiny
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: FALSE
+    number_sections: true
+    # theme:
+    #   bg: "#101010"
+    #   fg: "#FDF7F7"
+    #   primary: "#ED79F9"
+    #   base_font:
+    #     google: "Prompt"
+    #   code_font:
+    #     google: "JetBrains Mono"
+---
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  cache = FALSE, cache.lazy = FALSE, autodep = TRUE, warning = FALSE, 
+  message = FALSE, echo = TRUE, dpi = 180,
+  fig.width = 8, fig.height = 5, echo = FALSE
+  )
+# thematic::thematic_rmd()
+# library(thematic)
+```
+
+```{r include=FALSE}
+#library set-up=================================================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+library(tidyverse)
+library(data.table)
+library(DT)
+library(networkD3)
+library(tidygraph)
+library(ggraph)
+library(readxl)
+library(here)
+library(scales)
+library(gridExtra)
+library(shiny)
+library(tidyverse)
+```
+
+```{r}
+#function load custom function defintion========================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+source(("helpers_networkPlots.R"))
+source(("utils_helpers_general.R"))
+source(("utils_helpers_DT.R"))
+
+condense = function(tab){
+  which(expanded_import_files$Var2 %in% tab)  %>%  
+    map(~query_list[.x] %>%  
+          .[[1]]) %>%  
+    rbindlist() %>%  
+    unique()
+}
+
+are_identical = function(tab){
+  tmp = which(expanded_import_files$Var2 %in% tab)  %>%  
+    head(2)
+  if (identical(query_list[tmp[1]], query_list[tmp[2]])) {
+    str_glue("The latest two queries of ETAN {tab} are identical, they have not changed between queries.") 
+    # %>%  
+    #   print()
+  } else {
+    str_glue("The latest two queries of ETAN {tab} are not identical, they have changed between queries.") 
+    # %>%  
+    #   print()
+  }
+}
+
+```
+
+```{r include=FALSE}
+#data set-up====================================================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# data_file = "ssms_queries_20210610.xlsx"
+
+files = list.files() 
+
+data_files = files[str_detect(files, "ssms")] %>%  
+  as.character()
+
+data_files_date = data_files %>%
+  map(~.x %>%
+        str_remove_all("[:punct:]") %>%
+        str_remove_all("[:alpha:]") %>%
+        lubridate::ymd()) 
+
+data_file_sheets = data_files[length(data_files)] %>% 
+  excel_sheets()
+
+expanded_import_files = expand.grid(data_files, data_file_sheets) %>% 
+  mutate(across(everything(), as.character), 
+         date = Var1 %>%  
+           str_remove_all("[:alpha:]") %>% 
+           str_remove_all("[:punct:]") %>%  
+           lubridate::ymd()) %>%  
+  arrange(Var2, desc(date))
+
+query_list = expanded_import_files %>%
+  pmap(~read_xlsx(.x,
+                    sheet = .y,
+                    skip = 3) %>%
+          as.data.table() %>%  
+         .[,`:=`(as_of = .x)]
+        )
+
+count_list_full =  condense("table_record_count") %>%  
+  mutate(as_of = str_remove_all(as_of, "[:punct:]") %>% 
+           str_remove_all("[:alpha:]") %>%  
+           lubridate::ymd())
+count_list = count_list_full %>%  
+  filter(as_of == max(as_of))
+constraint_list = condense("table_constraints") %>%  
+  filter(as_of == max(as_of))
+view_construction = condense("view_construction") %>%  
+  filter(as_of == max(as_of))
+view_record_count = condense("view_record_count") %>%  
+  filter(as_of == max(as_of))
+table_view_columns = condense("table_&_view_columns") %>%  
+  filter(as_of == max(as_of))
+```
+
+```{r}
+cleaned_connections = 
+  constraint_list %>%
+  filter(str_detect(CONSTRAINT_NAME, "2")) %>%  #only keeps records where CONSTRAINT_NAME has a "2" in it
+  separate(col = CONSTRAINT_NAME, sep ="_2_", into = c("from_complete", "to_complete")) %>%  
+  na_if("NA") %>%  #makes sure string NAs are registered 
+  filter(complete.cases(.)) %>%  #removes incomplete records
+  filter(!str_detect(from_complete, "description_")) %>%  #removes records where from has "description_" - should be fixed later but don't know how to now
+  filter(str_detect(to_complete, "_")) %>% #removes records that do not have schema_table
+  separate(col = from_complete, sep ="_", into = c("type", "from_table", "from_column"), remove = F) %>% 
+  separate(col = to_complete, sep ="_", into = c("to_schema", "to_table"), remove = F) %>%  
+  mutate(from_complete = str_sub(from_complete, 4,-1), 
+         from_schema = CONSTRAINT_SCHEMA, 
+         from_complete = paste0(from_schema, "_", from_table)) %>%  
+  merge(count_list[, c(1,3)], by.x = "from_table", by.y = "TableName") %>%  
+  merge(count_list[, c(1,3)], by.x = "to_table", by.y = "TableName", suffixes = c("_from", "_to"), all.x = T) %>%
+  select("CONSTRAINT_CATALOG", "type", contains("from"), contains("to")) %>%  
+   rename(c('to_rows' = 'rows_to', 'from_rows' = 'rows_from')) %>% 
+  arrange(desc(from_rows)) %>%  
+  mutate(as_of = Sys.Date())
+
+cleaned_connections_0filtered = cleaned_connections %>%  
+  filter(to_rows > 0, 
+         from_rows > 0)
+
+cleaned_view_construct =  view_construction %>%  
+  mutate(to_complete = str_glue("{schema_name}_{view_name}"), 
+         from_complete = str_glue("{referenced_schema_name}_{referenced_entity_name}")) 
+
+cleaned_table_view_columns = table_view_columns %>%  
+  merge.data.table(count_list, 
+                   by.x = c("TABLE_SCHEMA", "TABLE_NAME"), 
+                   by.y = c("SchemaName", "TableName")) %>%  
+  select(TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, rows) %>%  
+  filter(rows>0)
+
+```
+
+```{r}
+#var defintion==================================================================
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+```
+
+# Introduction/Summary
+
+This tool was made to help users explore the ETAN database. Plots and tables have been provided to report descriptive statistics about tables and views in the database. The tables included in this tool can be copied and saved locally. 
+
+The data reported used for this tool was queried on **`r data_files_date[length(data_files_date)][[1]]`**.
+
+```{r}
+expanded_import_files$Var2 %>%  
+  unique() %>% 
+  map(are_identical)
+```
+
+
+# Database Schema
+
+The left plot below details the number of tables per each schema. The right plot below details the total number of records in each schema - the coloring depicts the number of records for unique tables given a schema. Most records are in a handful of schema and only from a few tables therein.
+```{r fig.height=4}
+plot_schema_tables = 
+  count_list %>%  
+  group_by(SchemaName) %>%  
+  count(sort = T, name = "Tables") %>% 
+  mutate(SchemaName = fct_reorder(SchemaName, Tables, sum)) %>%
+  ggplot() + 
+  geom_col(aes(SchemaName, Tables)) + 
+  theme(legend.position = "none") + 
+  coord_flip() + 
+  labs(title = "Tables per Schema")
+
+plot_schema_records = count_list %>%
+  mutate(SchemaName = fct_reorder(SchemaName, rows, sum)) %>% 
+  ggplot() + 
+  geom_col(aes(SchemaName, log10(rows), fill = TableName)) + 
+  theme(legend.position = "none") + 
+  coord_flip() + 
+  scale_fill_viridis_d() +
+  labs(title = "Records per Schema")
+
+grid.arrange(
+plot_schema_tables, 
+plot_schema_records
+, ncol = 2)
+```
+
+ 
+# Database Tables
+
+---
+
+## Full Schema/Table/Column List 
+
+The table below details the each table's record count and the columns it contains.
+```{r}
+cleaned_table_view_columns %>% 
+  .[, .SD[1], by = .(TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME)] %>% 
+  .[,`:=`(`<100` = case_when(rows<100~"Yes", 
+                               T~"No"),
+          `<50` = case_when(rows<50~"Yes", 
+                               T~"No"))] %>% 
+    dt_common(y = 500,
+            sel = "multiple",
+            pl = 10000,
+            filter = "top",
+            dom = "Bftipr")
+```
+
+## Table Record Histogram
+
+The histogram details the number of tables given record count bin. 
+```{r}
+selectInput("query_date", "Date Queried",
+                   choices = unique(count_list_full$as_of) ,
+                   selected = unique(count_list_full$as_of)[1])
+
+renderPlot({
+  count_list_full %>%  
+    arrange(SchemaName, TableName, desc(as_of)) %>% 
+    filter(as_of == input$query_date) %>% 
+    ggplot() + 
+    geom_histogram(aes(rows), color = "black") +
+    scale_x_continuous(trans='log10', 
+                       breaks = trans_breaks("log10", function(x) 10^x),
+                       labels = trans_format("log10", math_format(10^.x))) + 
+    labs(title = "Histogram of Records per Table") 
+  # +
+  #   facet_grid(cols = vars(as.factor(as_of)))
+})
+```
+
+```{r}
+double_count_list = count_list_full %>% 
+  group_by(TableName, SchemaName) %>%  
+  count(sort = T) %>%  
+  filter(n>2)
+
+table_change_list_full = count_list_full %>% 
+  .[order(SchemaName, TableName, as_of)] %>% 
+  .[,`:=`(log_rows = log10(rows) %>% round(0) )] %>% 
+  .[,`:=`(rec_diff = rows-lag(rows)), by = .(SchemaName, TableName)] %>% 
+  .[order(TableName, desc(as_of))] %>% 
+  .[!str_detect(TableName, "Description$")] %>% 
+  .[,`:=`(`%_increase` = 100*(rec_diff/(rows-rec_diff)))]
+
+table_change_list_0rm = table_change_list_full %>% 
+  .[, .SD[1], by = .(TableName)] %>%  
+  .[rows >0] 
+
+table_change_list_0 = table_change_list_full %>% 
+  .[, .SD[1], by = .(TableName)] %>%  
+  .[rows == 0] 
+```
+
+## Changes in Table Records
+
+This heat-map helps you explore changes in the table records over time. Coloring is defined by record % Increase across query exports - users can define color scaling (no transformation or log10).
+```{r}
+splitLayout(cellWidths = c("50%", "40%"),
+            selectInput("color_scale", "Pick color scaling:",
+                   choices = c("`%_increase`", "log10(`%_increase`)"),
+                   selected = "`%_increase`"),
+            selectInput("schema_select_1", "View Schema:",
+                   choices = sort(unique(c(table_change_list_full$SchemaName))),
+                   selected = "vehicle")
+)
+# input = list(color_scale = "rows", 
+#              schema_select_1 = "vehicle")
+renderPlot({
+  table_change_list_full %>%  
+    .[rows >0 , ] %>% 
+    .[SchemaName == input$schema_select_1, ] %>%
+    .[order(SchemaName, TableName, as_of)] %>% 
+    .[,`:=`(crrct0 = crrct0(rows)), by = .(TableName, SchemaName)] %>%
+    .[, .SD[mean(`%_increase`, na.rm = T) > 0],  by = .(TableName, SchemaName)] %>% 
+    # .[,`:=`(text = stringr::str_glue("Date Queried: {as_of}\nRecords: {rows}\nPercent Increase: {`%_increase`}"))] %>% 
+    .[,`:=`(text = paste0("Date Queried: ",as_of,"\nRecords: ",rows, "\nPercent Increase: ", `%_increase`))] %>%  
+    ggplot() + 
+    geom_tile(aes_string('as.character(as_of)', 'TableName', fill = input$color_scale, label = "text"
+    )) +  
+    theme_classic() +
+    labs(x = "Date Queried", fill = "Record") +
+    scale_fill_viridis_c(na.value="grey") 
+  
+})
+```
+
+This table contains the same information seen in the plot above. Static tables (no increase in records) have been removed from this table.
+```{r}
+table_change_list_full %>%  
+  .[rows > 0] %>% 
+      .[, .SD[mean(`%_increase`, na.rm = T) > 0],  by = .(TableName, SchemaName)] %>%
+  dt_common(y = 500,
+            sel = "multiple",
+            pl = 10000,
+            filter = "top",
+            dom = "Bftipr") %>%
+  DT::formatStyle(
+    '% Increase',
+    background = DT::styleColorBar(table_change_list_0rm$`%_increase`, 'lightblue'),
+    backgroundSize = '100% 90%',
+    backgroundRepeat = 'no-repeat',
+    backgroundPosition = 'center'
+  ) %>% 
+  formatRound('% Increase', digits=3)
+```
+
+```{r eval=F}
+table_change_list_full %>%  
+  .[rows == 0] %>%
+  dt_common(y = 500,
+            sel = "multiple",
+            pl = 10000,
+            filter = "top",
+            dom = "Bftipr") %>%
+  DT::formatStyle(
+    '% Increase',
+    background = DT::styleColorBar(table_change_list_0rm$`%_increase`, 'lightblue'),
+    backgroundSize = '100% 90%',
+    backgroundRepeat = 'no-repeat',
+    backgroundPosition = 'center'
+  ) %>% 
+  formatRound('% Increase', digits=3)
+```
+
+
+## ETAN Database Table Constraints
+
+---
+
+### Constraint Table
+
+This table details all ETAN table constraints - queried from ETAN database on `r Sys.Date()`.
+```{r}
+# checkboxGroupInput("column_limit", "Select columns to hide:", colnames(pretty_col_names(cleaned_connections)), inline = T)
+# columns2hide = reactive({
+#   match(input$column_limit, colnames(pretty_col_names(cleaned_connections)))
+# })
+renderDT({
+  cleaned_connections %>%
+    select(-c('CONSTRAINT_CATALOG', "type", "as_of"), -contains("table")) %>% 
+    dt_common(y = 500,
+              pl = 10000,
+              filter = "top",
+              dom = "Bftipr") %>%
+    DT::formatSignif('From Rows', 3) %>%
+  DT::formatStyle(
+    'From Rows',
+    background = DT::styleColorBar(cleaned_connections$from_rows, 'lightblue'),
+    backgroundSize = '100% 90%',
+    backgroundRepeat = 'no-repeat',
+    backgroundPosition = 'center'
+  ) %>%
+  DT::formatSignif('To Rows', 3) %>%
+  DT::formatStyle(
+    'To Rows',
+    background = DT::styleColorBar(cleaned_connections$to_rows, 'lightblue'),
+    backgroundSize = '100% 90%',
+    backgroundRepeat = 'no-repeat',
+    backgroundPosition = 'center'
+  )
+})
+
+```
+
+### Constraints Diagram
+
+This diagram graphically depicts ETAN table constraints - it can be considered an ERD (entity relationship diagram). Tables with zero records were removed from this graphic. The network plot requires a "To" and "From" designation for each table pair constraint, these names are superficial.
+```{r}
+schema_remove = function(data, schema){
+  data %>% 
+    filter(!str_detect(to_complete, schema),
+         !str_detect(from_complete, schema))
+}
+
+schema_keep_only = function(data, schema){
+  data %>% 
+    filter(str_detect(to_complete, schema),
+           str_detect(from_complete, schema))
+}
+```
+
+```{r}
+remove_list = c("info_InputSource", "info_InputUser", "Info_EnuInputLocation")
+
+tmp = cleaned_connections_0filtered %>% 
+  filter(to_complete %nin% remove_list,
+         from_complete %nin% remove_list)
+
+index_select = c(6, 10, 13, 15, 16)
+
+checkboxGroupInput("yolo", "From Table", inline = T,
+                   choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
+                   selected = sort(unique(c(tmp$from_schema, tmp$to_schema)))[index_select]   )
+checkboxGroupInput("to_schema", "To Table", inline = T,
+                   choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
+                   selected = sort(unique(c(tmp$from_schema, tmp$to_schema)))[index_select]   )
+
+sliderInput("charge", "Network Charge (more negative spreads):",
+    min = -40, max = 0, value = -10, step = 10)
+
+observe({
+  print(input$yolo)
+})
+
+
+renderForceNetwork({
+tmp %>%
+    dplyr::filter(to_schema %in%  input$yolo,
+           to_schema %in%  input$to_schema) %>% 
+  make_force_network(charge = input$charge)
+})
+```
+
+# ETAN Database Views
+
+---
+
+## View Construction Table
+
+This table depicts the views contained in the ETAN database. The _To Complete_ column contains full view names (schema+view) and _From Complete_ column contains full table names for the table which make said view. The table is organized in a long/machine readable format.
+```{r}
+renderDT({
+cleaned_view_construct %>%  
+  select(entity_type, from_complete, to_complete) %>% 
+  setNames(c("type", "Table", "View")) %>% 
+  dt_common(y = 500,
+            sel = "multiple",
+            pl = 10000,
+            filter = "top",
+            dom = "Bftipr")
+})
+
+```
+
+## Table/View Flow Chart
+
+The below plot visualizes table-view construction relationships as defined in the table above. This plot is in development. 
+```{r fig.height=12}
+tmp_cleaned_view_construct = cleaned_view_construct %>%  
+  schema_remove("info_InputSource") %>% 
+  schema_remove("info_InputUser") %>% 
+  schema_remove("info_EnuInputLocation") %>% 
+  schema_remove("config_") %>% 
+  schema_remove("comm_")
+
+sliderInput("connections", "Number of Connections:",
+    min = 0, max = 25, value = c(0, 25), step = 1)
+
+selectInput("from_complete", "View Schema:",
+                   choices = sort(unique(c(tmp_cleaned_view_construct$schema_name))),
+                   selected = "vehicle")
+# observe({print(input$connections)})
+renderSankeyNetwork({
+  tmp_cleaned_view_construct %>% 
+    filter(str_detect(schema_name, input$from_complete)) %>% 
+    group_by(to_complete) %>%
+    filter(between(n(), input$connections[1], input$connections[2])) %>% 
+    make_force_sankey()
+})
+
+
+```
+
+
+
+
+
+
+
