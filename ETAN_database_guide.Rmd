@@ -22,9 +22,6 @@ output:
     #     google: "JetBrains Mono"
 ---
 
-
-
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
   cache = FALSE, cache.lazy = FALSE, autodep = TRUE, warning = FALSE, 
@@ -65,6 +62,14 @@ condense = function(tab){
           .[[1]]) %>%  
     rbindlist() %>%  
     unique()
+}
+
+clean_asof = function(data){
+  data %>% 
+    mutate(as_of = str_remove_all(as_of, "[:punct:]") %>% 
+             str_remove_all("[:alpha:]") %>%  
+             lubridate::ymd()) %>%  
+    filter(as_of == max(as_of))
 }
 
 are_identical = function(tab){
@@ -118,20 +123,20 @@ query_list = expanded_import_files %>%
          .[,`:=`(as_of = .x)]
         )
 
-count_list_full =  condense("table_record_count") %>%  
-  mutate(as_of = str_remove_all(as_of, "[:punct:]") %>% 
-           str_remove_all("[:alpha:]") %>%  
+count_list_full =  condense("table_record_count") %>%
+  mutate(as_of = str_remove_all(as_of, "[:punct:]") %>%
+           str_remove_all("[:alpha:]") %>%
            lubridate::ymd())
-count_list = count_list_full %>%  
-  filter(as_of == max(as_of))
-constraint_list = condense("table_constraints") %>%  
-  filter(as_of == max(as_of))
+count_list = condense("table_record_count") %>%  
+  clean_asof()
+constraint_list = condense("table_constraints") %>% 
+  clean_asof()
 view_construction = condense("view_construction") %>%  
-  filter(as_of == max(as_of))
-view_record_count = condense("view_record_count") %>%  
-  filter(as_of == max(as_of))
+  clean_asof()
+# view_record_count = condense("view_record_count") %>%  
+#   clean_asof()
 table_view_columns = condense("table_&_view_columns") %>%  
-  filter(as_of == max(as_of))
+  clean_asof()
 ```
 
 ```{r}
@@ -139,7 +144,7 @@ cleaned_connections =
   constraint_list %>%
   filter(str_detect(CONSTRAINT_NAME, "2")) %>%  #only keeps records where CONSTRAINT_NAME has a "2" in it
   separate(col = CONSTRAINT_NAME, sep ="_2_", into = c("from_complete", "to_complete")) %>%  
-  na_if("NA") %>%  #makes sure string NAs are registered 
+  # na_if("NA") %>%  #makes sure string NAs are registered 
   filter(complete.cases(.)) %>%  #removes incomplete records
   filter(!str_detect(from_complete, "description_")) %>%  #removes records where from has "description_" - should be fixed later but don't know how to now
   filter(str_detect(to_complete, "_")) %>% #removes records that do not have schema_table
@@ -292,7 +297,8 @@ table_change_list_0 = table_change_list_full %>%
 
 This heat-map helps you explore changes in the table records over time. Coloring is defined by record % Increase across query exports - users can define color scaling (no transformation or log10).
 ```{r}
-splitLayout(cellWidths = c("50%", "40%"),
+splitLayout(tags$head(tags$style(HTML(".shiny-split-layout > div {overflow: visible;}"))),
+            cellWidths = c("0%", "50%", "40%"),
             selectInput("color_scale", "Pick color scaling:",
                    choices = c("`%_increase`", "log10(`%_increase`)"),
                    selected = "`%_increase`"),
@@ -300,8 +306,7 @@ splitLayout(cellWidths = c("50%", "40%"),
                    choices = sort(unique(c(table_change_list_full$SchemaName))),
                    selected = "vehicle")
 )
-# input = list(color_scale = "rows", 
-#              schema_select_1 = "vehicle")
+
 renderPlot({
   table_change_list_full %>%  
     .[rows >0 , ] %>% 
