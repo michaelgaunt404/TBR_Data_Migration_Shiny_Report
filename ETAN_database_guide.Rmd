@@ -60,7 +60,7 @@ condense = function(tab){
   which(expanded_import_files$Var2 %in% tab)  %>%  
     map(~query_list[.x] %>%  
           .[[1]]) %>%  
-    rbindlist() %>%  
+    rbindlist(fill = F) %>%  
     unique()
 }
 
@@ -128,45 +128,81 @@ count_list_full =  condense("table_record_count") %>%
            str_remove_all("[:alpha:]") %>%
            lubridate::ymd())
 count_list = condense("table_record_count") %>%  
-  clean_asof()
+  clean_asof() %>%  
+  mutate_if(is.character, str_to_lower)
 constraint_list = condense("table_constraints") %>% 
   clean_asof()
 view_construction = condense("view_construction") %>%  
   clean_asof()
-# view_record_count = condense("view_record_count") %>%  
-#   clean_asof()
+view_record_count = condense("view_record_count") %>%
+  clean_asof()
 table_view_columns = condense("table_&_view_columns") %>%  
   clean_asof()
 ```
 
 ```{r}
-cleaned_connections = 
+#oneoffs
+systemobjects_records = read_xlsx("system_oneoffs.xlsx", sheet = "sys.objects_record_count") %>%  
+  mutate(full_name = str_glue("{schema_name}_{table_name}")) %>%
+  select(full_name, rows)
+```
+
+```{r}
+
+#NEEDS TO BE REWRITTEN BECAUSE OF SHITTY FROM_COMPLETES HAVING THE CHECMA IN IT SOMETIMES AND TOHER TIMES NOT
+
+cleaned_connections =
   constraint_list %>%
+  filter(CONSTRAINT_SCHEMA %nin% c("legacy", "gl")) %>% #these are never queried and they mess up the munge process - too special of a case
   filter(str_detect(CONSTRAINT_NAME, "2")) %>%  #only keeps records where CONSTRAINT_NAME has a "2" in it
+  # filter(str_detect(str_to_lower(CONSTRAINT_NAME), "tripledgerentryesc")) %>%
   separate(col = CONSTRAINT_NAME, sep ="_2_", into = c("from_complete", "to_complete")) %>%  
-  # na_if("NA") %>%  #makes sure string NAs are registered 
+  # na_if("NULL") %>%  #makes sure string NAs are registered 
   filter(complete.cases(.)) %>%  #removes incomplete records
   filter(!str_detect(from_complete, "description_")) %>%  #removes records where from has "description_" - should be fixed later but don't know how to now
   filter(str_detect(to_complete, "_")) %>% #removes records that do not have schema_table
-  separate(col = from_complete, sep ="_", into = c("type", "from_table", "from_column"), remove = F) %>% 
-  separate(col = to_complete, sep ="_", into = c("to_schema", "to_table"), remove = F) %>%  
+  mutate(from_sep = str_count(from_complete, "_"),
+         to_sep = str_count(to_complete, "_")) %>%
+  filter(from_sep < 4) %>%
+  data.table() %>% 
+  .[from_sep == 3,`:=`(from_complete = str_remove(from_complete, paste0(CONSTRAINT_SCHEMA, "_")))] %>% 
+  separate(col = from_complete, sep ="_", into = c("type","from_table", "from_column"), remove = F) %>% 
+  separate(col = to_complete, sep ="_", into = c("to_schema", "to_table", "to_column"), remove = F) %>%  
   mutate(from_complete = str_sub(from_complete, 4,-1), 
          from_schema = CONSTRAINT_SCHEMA, 
-         from_complete = paste0(from_schema, "_", from_table)) %>%  
+         from_complete = paste0(from_schema, "_", from_table), 
+         to_complete = paste0(to_schema, "_", to_table),
+         to_column = case_when(is.na(to_column)~from_column, 
+                               T~to_column)) %>% 
+  mutate_if(is.character, str_to_lower) %>% 
   merge(count_list[, c(1,3)], by.x = "from_table", by.y = "TableName") %>%  
   merge(count_list[, c(1,3)], by.x = "to_table", by.y = "TableName", suffixes = c("_from", "_to"), all.x = T) %>%
   select("CONSTRAINT_CATALOG", "type", contains("from"), contains("to")) %>%  
-   rename(c('to_rows' = 'rows_to', 'from_rows' = 'rows_from')) %>% 
+  rename(c('to_rows' = 'rows_to', 'from_rows' = 'rows_from')) %>% 
   arrange(desc(from_rows)) %>%  
   mutate(as_of = Sys.Date())
 
 cleaned_connections_0filtered = cleaned_connections %>%  
   filter(to_rows > 0, 
-         from_rows > 0)
-
+         from_rows > 0)  #%>% 
+    # filter(str_detect(str_to_lower(from_table), "tripledgerentryesc"))
+  
 cleaned_view_construct =  view_construction %>%  
   mutate(to_complete = str_glue("{schema_name}_{view_name}"), 
-         from_complete = str_glue("{referenced_schema_name}_{referenced_entity_name}")) 
+         from_complete = str_glue("{referenced_schema_name}_{referenced_entity_name}")) %>%  
+  merge(., systemobjects_records, 
+        by.x = 'to_complete', by.y = 'full_name') %>%  
+  select(schema_name,entity_type, from_complete, to_complete, rows)  %>%  
+  arrange(to_complete) %>% 
+  mutate(empty_check = case_when(rows == '0' | rows == "NULL"~"empty",
+                                 T~"has_records")) %>% 
+  mutate_if(is.character, str_to_lower) %>% 
+  mutate(to_enu = case_when(str_detect(str_to_lower(to_complete), "enu")~"Enu_view", 
+                            T~"Non-Enu"),
+         from_enu = case_when(str_detect(str_to_lower(from_complete), "enu")~"Enu_view", 
+                              T~"Non-Enu"), 
+         to_schema = gsub("_.*", "\\1", to_complete), 
+         from_schema = schema_name) 
 
 cleaned_table_view_columns = table_view_columns %>%  
   merge.data.table(count_list, 
@@ -296,7 +332,7 @@ table_change_list_0 = table_change_list_full %>%
 ## Changes in Table Records
 
 This heat-map helps you explore changes in the table records over time. Coloring is defined by record % Increase across query exports - users can define color scaling (no transformation or log10).
-```{r}
+```{r eval=FALSE}
 splitLayout(tags$head(tags$style(HTML(".shiny-split-layout > div {overflow: visible;}"))),
             cellWidths = c("0%", "50%", "40%"),
             selectInput("color_scale", "Pick color scaling:",
@@ -424,32 +460,103 @@ schema_keep_only = function(data, schema){
 ```{r}
 remove_list = c("info_InputSource", "info_InputUser", "Info_EnuInputLocation")
 
-tmp = cleaned_connections_0filtered %>% 
+tmp =
+  cleaned_connections_0filtered %>% 
   filter(to_complete %nin% remove_list,
-         from_complete %nin% remove_list)
+         from_complete %nin% remove_list) %>%  
+  mutate(to_enu = case_when(str_detect(str_to_lower(to_complete), "enu")~"Enu", 
+                            T~"Non-Enu"),
+         from_enu = case_when(str_detect(str_to_lower(from_complete), "enu")~"Enu", 
+                              T~"Non-Enu")) %>% 
+  select(contains("complete"), contains("schema"), contains("enu")) %>% 
+  mutate(is_view = "table") %>% 
+  bind_rows(., cleaned_view_construct %>% 
+              select(contains("complete"), ends_with("schema"), contains("enu")) %>%  
+              mutate(is_view = "view")
+            ) 
+# %>%  
+#   mutate(is_view = case_when(str_detect(to_complete, "_v_|_iv_")~"view", 
+#                              T~"table")) 
 
-index_select = c(6, 10, 13, 15, 16)
+# tmp %>%  
+#   filter(str_detect(from_complete, "helper"))
 
-checkboxGroupInput("yolo", "From Table", inline = T,
+
+# index_select = c(6, 10, 13, 15, 16)
+
+# checkboxGroupInput("yolo", "From Table", inline = T,
+#                    choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
+#                    selected = sort(unique(c(tmp$from_schema, tmp$to_schema)))[index_select]   )
+checkboxGroupInput("to_schema", "Inlcuded Schemas:", inline = T,
                    choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
-                   selected = sort(unique(c(tmp$from_schema, tmp$to_schema)))[index_select]   )
-checkboxGroupInput("to_schema", "To Table", inline = T,
-                   choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
-                   selected = sort(unique(c(tmp$from_schema, tmp$to_schema)))[index_select]   )
+                   selected = c("lance", "xact", "rtoll", "qfree"))
 
-sliderInput("charge", "Network Charge (more negative spreads):",
-    min = -40, max = 0, value = -10, step = 10)
-
-observe({
-  print(input$yolo)
-})
+selectInput("enu", "Enu Stable Inclusion", choices = c("Non-Enu", "Enu", "Enu_view"), 
+            selected = "Non-Enu", multiple = TRUE)
 
 
+selectInput("view", "View Inclusion", choices = c("view", "table"), 
+            selected = "table", multiple = TRUE)
+
+sliderInput("charge", "Network Charge (+negative = +spreads):", min = -40, max = 0, value = -10, step = 5)
+
+# observe({
+#   print(input$to_schema)
+#   print(input$enu)
+#   print(input$charge)
+#   print(input$view)
+# })
+# # 
+# observe({
+#   print(
+#     tmp %>%
+#     dplyr::filter(to_enu %in% input$enu, from_enu %in% input$enu)
+#     
+#     )
+# })
+# 
+# observe({
+#   print(tmp %>%
+#     dplyr::filter(to_schema %in% input$to_schema, to_schema %in% input$to_schema
+#                   ) )
+# })
+# input = tibble(enu = list("Non-Enu"), 
+#                charge = -20,
+#                to_schema = list("lance", "qfree"),
+#                view = list("table")
+#                
+# )
+# unlist(input$to_schema)
+# input$enu = "Non-Enu"
+# # 
 renderForceNetwork({
 tmp %>%
-    dplyr::filter(to_schema %in%  input$yolo,
-           to_schema %in%  input$to_schema) %>% 
+    dplyr::filter(to_schema %in% input$to_schema, to_schema %in% input$to_schema,
+                  to_enu %in% input$enu, from_enu %in% input$enu, 
+                  is_view %in% input$view
+                  ) %>%
   make_force_network(charge = input$charge)
+  # 
+  # 
+  # 
+  # tmp %>%
+  #   dplyr::filter(to_schema %in% unlist(input$to_schema), to_schema %in% unlist(input$to_schema),
+  #                 to_enu %in% unlist(input$enu), from_enu %in% unlist(input$enu), 
+  #                 is_view %in% unlist(input$view)
+  #                 ) %>%
+  # make_force_network(charge = input$charge)
+  
+  
+  
+  # # exclude = c("rtoll", "xact", "lance", "qfree")
+  # tmp %>%
+  #   select(contains("complete"), contains("schema"), contains("enu")) %>% 
+  #   filter(to_schema %in% exclude, from_schema %in% exclude,
+  #          to_enu == "Non-Enu", from_enu %in% "Non-Enu") %>%
+  #   # dplyr::filter(to_schema %in% input$to_schema, to_schema %in% input$to_schema,
+  #   #               to_enu %in% input$enu, from_enu %in% input$enu
+  #   #               ) %>%
+  # make_force_network(charge = -20)
 })
 ```
 
@@ -463,14 +570,26 @@ This table depicts the views contained in the ETAN database. The _To Complete_ c
 ```{r}
 renderDT({
 cleaned_view_construct %>%  
-  select(entity_type, from_complete, to_complete) %>% 
-  setNames(c("type", "Table", "View")) %>% 
+  select(entity_type, from_complete, to_complete, rows, empty_check) %>% 
+  setNames(c("type", "Table", "View", 'rows', 'empty_check')) %>% 
   dt_common(y = 500,
             sel = "multiple",
             pl = 10000,
             filter = "top",
             dom = "Bftipr")
 })
+
+# temp = systemobjects_records %>%  
+#   mutate(full_name = str_glue("{schema_name}_{table_name}")) %>%  
+#   select(full_name, rows)
+# 
+# cleaned_view_construct %>%  
+#   merge(., temp, 
+#         by.x = 'to_complete', by.y = 'full_name') %>%  
+#   select(entity_type, from_complete, to_complete, rows)  %>%  
+#   arrange(to_complete) %>% 
+#   mutate(empty_check = case_when(rows == '0' | rows == "NULL"~"empty",
+#                                  T~"has_records"))
 
 ```
 
@@ -486,20 +605,31 @@ tmp_cleaned_view_construct = cleaned_view_construct %>%
   schema_remove("comm_")
 
 sliderInput("connections", "Number of Connections:",
-    min = 0, max = 25, value = c(0, 25), step = 1)
+    min = 0, max = 25, value = c(1, 4), step = 1)
 
 selectInput("from_complete", "View Schema:",
                    choices = sort(unique(c(tmp_cleaned_view_construct$schema_name))),
                    selected = "vehicle")
-# observe({print(input$connections)})
-renderSankeyNetwork({
-  tmp_cleaned_view_construct %>% 
-    filter(str_detect(schema_name, input$from_complete)) %>% 
-    group_by(to_complete) %>%
-    filter(between(n(), input$connections[1], input$connections[2])) %>% 
-    make_force_sankey()
-})
 
+selectInput("empty_check", "Check Status:",
+                   choices = sort(unique(c(tmp_cleaned_view_construct$empty_check))),
+                   selected = "has_records")
+
+renderSankeyNetwork({
+  tmp_cleaned_view_construct %>%
+    filter(str_detect(schema_name, input$from_complete),
+           empty_check == input$empty_check[1]) %>%
+    group_by(to_complete) %>%
+    filter(between(n(), input$connections[1], input$connections[2])) %>%
+    make_force_sankey()
+
+  # tmp_cleaned_view_construct %>% 
+  #   filter(str_detect(schema_name, input$from_complete),
+  #          empty_check == input$empty_check[1]) %>% 
+  #   group_by(to_complete) %>%
+  #   filter(n() == input$connections[1]) %>% 
+  #   make_force_sankey()
+})
 
 ```
 

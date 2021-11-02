@@ -26,6 +26,7 @@ read_csv_allFiles <- function(file_list, extra_path) {
   data_list
 }
 
+
 #helper to make floor divides
 #generally used to make bins
 floor_divide = function(value, floor){
