@@ -205,10 +205,13 @@ cleaned_view_construct =  view_construction %>%
          from_schema = schema_name) 
 
 cleaned_table_view_columns = table_view_columns %>%  
+  mutate_if(is.character, str_to_lower) %>%
   merge.data.table(count_list, 
                    by.x = c("TABLE_SCHEMA", "TABLE_NAME"), 
-                   by.y = c("SchemaName", "TableName")) %>%  
-  select(TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, rows) %>%  
+                   by.y = c("SchemaName", "TableName")) %>% 
+  mutate(is_view = case_when(str_detect(TABLE_NAME, "v_")~"View", 
+                                        T~"Table")) %>%   
+  select(is_view, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, rows) %>%  
   filter(rows>0)
 
 ```
@@ -286,7 +289,7 @@ cleaned_table_view_columns %>%
 ## Table Record Histogram
 
 The histogram details the number of tables given record count bin. 
-```{r}
+```{r eval=F}
 selectInput("query_date", "Date Queried",
                    choices = unique(count_list_full$as_of) ,
                    selected = unique(count_list_full$as_of)[1])
@@ -306,7 +309,7 @@ renderPlot({
 })
 ```
 
-```{r}
+```{r eval=F}
 double_count_list = count_list_full %>% 
   group_by(TableName, SchemaName) %>%  
   count(sort = T) %>%  
@@ -363,7 +366,7 @@ renderPlot({
 ```
 
 This table contains the same information seen in the plot above. Static tables (no increase in records) have been removed from this table.
-```{r}
+```{r eval=F}
 table_change_list_full %>%  
   .[rows > 0] %>% 
       .[, .SD[mean(`%_increase`, na.rm = T) > 0],  by = .(TableName, SchemaName)] %>%
@@ -457,7 +460,7 @@ schema_keep_only = function(data, schema){
 }
 ```
 
-```{r}
+```{r }
 remove_list = c("info_InputSource", "info_InputUser", "Info_EnuInputLocation")
 
 tmp =
@@ -474,89 +477,89 @@ tmp =
               select(contains("complete"), ends_with("schema"), contains("enu")) %>%  
               mutate(is_view = "view")
             ) 
-# %>%  
-#   mutate(is_view = case_when(str_detect(to_complete, "_v_|_iv_")~"view", 
-#                              T~"table")) 
 
-# tmp %>%  
-#   filter(str_detect(from_complete, "helper"))
+checkboxGroupInput("schema", "Inlcuded Schemas:", inline = T,
+                               choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
+                               selected = c("lance", "xact", "rtoll", "qfree", "vehicle", "util"))
 
+splitLayout(cellWidths = c("25%", "25%", "50%"),
+            
+            selectInput("enu", "Enu Stable Inclusion", choices = c("Non-Enu", "Enu", "Enu_view"), 
+                        selected = "Non-Enu", multiple = TRUE),
+            selectInput("view", "View Inclusion", choices = c("view", "table"), 
+                        selected = "table", multiple = TRUE),
+            textInput("highlight", "Highlight a Node:", value = "place_holderz", placeholder = "highlight string")
 
-# index_select = c(6, 10, 13, 15, 16)
+)
 
-# checkboxGroupInput("yolo", "From Table", inline = T,
-#                    choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
-#                    selected = sort(unique(c(tmp$from_schema, tmp$to_schema)))[index_select]   )
-checkboxGroupInput("to_schema", "Inlcuded Schemas:", inline = T,
-                   choices = sort(unique(c(tmp$from_schema, tmp$to_schema))),
-                   selected = c("lance", "xact", "rtoll", "qfree"))
-
-selectInput("enu", "Enu Stable Inclusion", choices = c("Non-Enu", "Enu", "Enu_view"), 
-            selected = "Non-Enu", multiple = TRUE)
-
-
-selectInput("view", "View Inclusion", choices = c("view", "table"), 
-            selected = "table", multiple = TRUE)
 
 sliderInput("charge", "Network Charge (+negative = +spreads):", min = -40, max = 0, value = -10, step = 5)
 
-# observe({
-#   print(input$to_schema)
-#   print(input$enu)
-#   print(input$charge)
-#   print(input$view)
-# })
-# # 
-# observe({
-#   print(
-#     tmp %>%
-#     dplyr::filter(to_enu %in% input$enu, from_enu %in% input$enu)
-#     
-#     )
-# })
+
+# input = data.frame(spec = "nocp", 
+#                    deg_sep = 2, 
+#                    is_view = "table"
+#                    )
 # 
-# observe({
-#   print(tmp %>%
-#     dplyr::filter(to_schema %in% input$to_schema, to_schema %in% input$to_schema
-#                   ) )
-# })
-# input = tibble(enu = list("Non-Enu"), 
-#                charge = -20,
-#                to_schema = list("lance", "qfree"),
-#                view = list("table")
-#                
-# )
-# unlist(input$to_schema)
-# input$enu = "Non-Enu"
-# # 
+# srch_shcema =  c("lance", "xact", "rtoll", "qfree", "vehicle", "util")
+# 
+# 
+# 
+# 
+# tmp %>%  
+#   filter(str_detect(to_complete, input$spec) |
+#            str_detect(from_complete, input$spec)) %>%  
+#   filter(is_view %in% input$is_view)
+# 
+# 
+# ##need a base to change for first thing you search for
+# temp = tmp %>%  
+#   filter(str_detect(to_complete, input$spec) |
+#            str_detect(from_complete, input$spec)) %>%  
+#   filter(is_view %in% input$is_view)
+# 
+# for (i in 1:input$deg_sep-1) {
+#   
+#   index = c(temp$to_complete,
+#             temp$from_complete) %>%  
+#     unique()
+#   
+#   temp = tmp %>%
+#     dplyr::filter(to_complete %in% index | 
+#                     from_complete %in% index) %>% 
+#     filter(to_schema %in% srch_shcema, from_schema %in% srch_shcema,
+#                   is_view %in% input$is_view
+#     ) %>% 
+#     bind_rows(temp, .) %>%  
+#     unique()  
+#     
+# }
+# 
+# temp %>%  make_force_network(charge = -20)
+
 renderForceNetwork({
+  # tmp %>%  print()
 tmp %>%
-    dplyr::filter(to_schema %in% input$to_schema, to_schema %in% input$to_schema,
+    dplyr::filter(to_schema %in% input$schema, from_schema %in% input$schema,
                   to_enu %in% input$enu, from_enu %in% input$enu, 
                   is_view %in% input$view
                   ) %>%
-  make_force_network(charge = input$charge)
-  # 
-  # 
-  # 
-  # tmp %>%
-  #   dplyr::filter(to_schema %in% unlist(input$to_schema), to_schema %in% unlist(input$to_schema),
-  #                 to_enu %in% unlist(input$enu), from_enu %in% unlist(input$enu), 
-  #                 is_view %in% unlist(input$view)
-  #                 ) %>%
-  # make_force_network(charge = input$charge)
-  
-  
-  
-  # # exclude = c("rtoll", "xact", "lance", "qfree")
-  # tmp %>%
-  #   select(contains("complete"), contains("schema"), contains("enu")) %>% 
-  #   filter(to_schema %in% exclude, from_schema %in% exclude,
-  #          to_enu == "Non-Enu", from_enu %in% "Non-Enu") %>%
-  #   # dplyr::filter(to_schema %in% input$to_schema, to_schema %in% input$to_schema,
-  #   #               to_enu %in% input$enu, from_enu %in% input$enu
-  #   #               ) %>%
-  # make_force_network(charge = -20)
+  make_force_network(charge = input$charge
+                     ,
+                     highlight = input$highlight
+                     )
+# 
+# 
+# tmp %>%
+#     dplyr::filter(to_schema %in% input$to_schema, to_schema %in% input$to_schema,
+#                   to_enu %in% input$enu, from_enu %in% input$enu, 
+#                   is_view %in% input$view
+#                   ) %>%
+#   make_force_network(charge = input$charge
+#                      # , 
+#                      # highlight = input$highlight
+#                      )
+
 })
 ```
 

@@ -67,7 +67,7 @@ merge_link_node =  function(links, nodes){
     mutate(across(c(source, target), as.integer))
 }
 
-make_force_network = function(data, charge = -20){
+make_force_network = function(data, charge = -20, highlight = "place_holderz"){
   links = make_links(data, "from_complete", "to_complete")
   
   nodes = make_nodes(links) %>%  
@@ -78,17 +78,21 @@ make_force_network = function(data, charge = -20){
     mutate(value = 1)
   
   nodes2 = nodes %>%  
-    mutate(group = gsub("_.*","\\1", name) %>%
-             as.factor()            , 
+    mutate(group = gsub("_.*","\\1", name) , 
            name = as.factor(name)) %>%
-    select(name, group)  
-  
-  forceNetwork(Links = links2, Nodes = nodes2,
+    mutate(group = case_when(str_detect(name, highlight)~"highlight", 
+                       T~group)) %>% 
+    mutate(weight = case_when(str_detect(name, highlight)~100, 
+                             T~1)) %>%  
+    select(name, group, weight)
+    
+    forceNetwork(Links = links2, Nodes = nodes2,
                Source = "source", Target = "target",
                Value = "value", NodeID = "name",
                Group = "group", opacity = 0.8, fontSize = 14, charge = charge,
+               Nodesize = "weight",
                zoom = T, legend = T,
-               arrows = T, bounded = T)
+               arrows = F, bounded = T)
 }
 
 make_force_sankey = function(data){
